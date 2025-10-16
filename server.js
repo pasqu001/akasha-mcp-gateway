@@ -37,9 +37,7 @@ const toolSpec = {
 const server = http.createServer((req, res) => {
   const { pathname } = parse(req.url || "/", false);
 
-  // Discovery endpoint required by many clients (including the Builder)
   if (pathname === "/.well-known/mcp") {
-    // infer scheme/host to build the wss URL Render will expose
     const host = req.headers["x-forwarded-host"] || req.headers.host;
     const proto = (req.headers["x-forwarded-proto"] || "https").toString();
     const wsProto = proto === "https" ? "wss" : "ws";
@@ -53,13 +51,11 @@ const server = http.createServer((req, res) => {
         transport: { type: "websocket", url: mcpUrl }
       }
     };
-    const text = JSON.stringify(body);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(text);
+    res.end(JSON.stringify(body));
     return;
   }
 
-  // Simple root helps sanity-check deploys
   if (pathname === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
@@ -77,53 +73,70 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-// --- WebSocket MCP gateway ---
-const wss = new WebSocketServer({ noServer: true });
+// --- WebSocket MCP gateway (accept subprotocol 'mcp') ---
+const wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols /*, request */) => {
+    if (Array.isArray(protocols) && protocols.includes("mcp")) return "mcp";
+    return protocols?.[0] || undefined; // accept even if none provided
+  }
+});
 
-wss.on("connection", (ws) => {
+function send(ws, obj) {
+  ws.send(JSON.stringify(obj));
+}
+
+wss.on("connection", (ws, req) => {
+  console.log("WS connection established. Protocol:", ws.protocol || "(none)");
+
   ws.on("message", async (buf) => {
-    let req;
+    let reqMsg;
     try {
-      req = JSON.parse(buf.toString());
+      reqMsg = JSON.parse(buf.toString());
     } catch {
       return;
     }
+    const id = reqMsg.id;
 
     // 1) MCP handshake
-    if (req.method === "initialize") {
-      ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: req.id,
-          result: { protocolVersion: PROTOCOL_VERSION, capabilities: {} }
-        })
-      );
+    if (reqMsg.method === "initialize") {
+      send(ws, {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: PROTOCOL_VERSION,
+          serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+          capabilities: { tools: {} }
+        }
+      });
+      return;
+    }
+
+    // Optional no-ops some clients call
+    if (reqMsg.method === "ping") {
+      send(ws, { jsonrpc: "2.0", id, result: { ok: true } });
+      return;
+    }
+    if (reqMsg.method === "resources/list") {
+      send(ws, { jsonrpc: "2.0", id, result: { resources: [] } });
+      return;
+    }
+    if (reqMsg.method === "prompts/list") {
+      send(ws, { jsonrpc: "2.0", id, result: { prompts: [] } });
       return;
     }
 
     // 2) List tools
-    if (req.method === "tools/list") {
-      ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: req.id,
-          result: { tools: [toolSpec] }
-        })
-      );
+    if (reqMsg.method === "tools/list") {
+      send(ws, { jsonrpc: "2.0", id, result: { tools: [toolSpec] } });
       return;
     }
 
     // 3) Call tool
-    if (req.method === "tools/call") {
-      const { name, arguments: args } = req.params || {};
+    if (reqMsg.method === "tools/call") {
+      const { name, arguments: args } = reqMsg.params || {};
       if (name !== "qdrant_search") {
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: req.id,
-            error: { code: -32601, message: "Unknown tool" }
-          })
-        );
+        send(ws, { jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown tool" } });
         return;
       }
 
@@ -143,50 +156,35 @@ wss.on("connection", (ws) => {
 
         if (!r.ok) {
           const errTxt = await r.text();
-          ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: req.id,
-              result: {
-                content: [{ type: "text", text: `FastAPI ${r.status}: ${errTxt}` }],
-                isError: true
-              }
-            })
-          );
+          send(ws, {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [{ type: "text", text: `FastAPI ${r.status}: ${errTxt}` }],
+              isError: true
+            }
+          });
           return;
         }
 
         const data = await r.json(); // { snippets: [...] }
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: req.id,
-            result: { content: [{ type: "json", data }], isError: false }
-          })
-        );
+        send(ws, {
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "json", data }], isError: false }
+        });
       } catch (e) {
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: req.id,
-            result: {
-              content: [{ type: "text", text: "Gateway error: " + String(e) }],
-              isError: true
-            }
-          })
-        );
+        send(ws, {
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: "Gateway error: " + String(e) }], isError: true }
+        });
       }
       return;
     }
 
     // Default
-    ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: req.id,
-        error: { code: -32601, message: "Method not found" }
-      })
-    );
+    send(ws, { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
   });
 });
 
@@ -197,9 +195,10 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
+  console.log("HTTP upgrade → WS /mcp. Protocol header:", req.headers["sec-websocket-protocol"]);
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
 
 server.listen(PORT, () => {
-  console.log(`HTTP up on :${PORT}  |  WS at /mcp  |  Discovery at /.well-known/mcp`);
+  console.log(`HTTP :${PORT}  |  WS /mcp  |  Discovery /.well-known/mcp`);
 });
