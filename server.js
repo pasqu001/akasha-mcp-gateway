@@ -5,20 +5,18 @@ import { parse } from "url";
 
 const PORT = process.env.PORT || 8080;
 const FASTAPI_URL = process.env.FASTAPI_URL;
-if (!FASTAPI_URL) {
-  console.error("FASTAPI_URL env var is required");
-  process.exit(1);
-}
+if (!FASTAPI_URL) { console.error("FASTAPI_URL env var is required"); process.exit(1); }
 
 const PROTOCOL_VERSION = "2024-05-14";
 const SERVER_NAME = "akasha-mcp";
 const SERVER_VERSION = "0.1.0";
 
+// IMPORTANT: snake_case per MCP spec
 const toolSpec = {
   name: "qdrant_search",
   description:
     "Embed + search via Akasha FastAPI /query. Args: query, traditions (string|array), topK, lang.",
-  inputSchema: {
+  input_schema: {
     type: "object",
     properties: {
       query: { type: "string" },
@@ -41,15 +39,7 @@ const server = http.createServer((req, res) => {
     const proto = (req.headers["x-forwarded-proto"] || "https").toString();
     const wsProto = proto === "https" ? "wss" : "ws";
     const mcpUrl = `${wsProto}://${host}/mcp`;
-
-    const body = {
-      mcp: {
-        name: SERVER_NAME,
-        version: SERVER_VERSION,
-        protocol: PROTOCOL_VERSION,
-        transport: { type: "websocket", url: mcpUrl }
-      }
-    };
+    const body = { mcp: { name: SERVER_NAME, version: SERVER_VERSION, protocol: PROTOCOL_VERSION, transport: { type: "websocket", url: mcpUrl } } };
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
     return;
@@ -61,8 +51,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  res.writeHead(404);
-  res.end();
+  res.writeHead(404); res.end();
 });
 
 // ---------- WebSocket MCP ----------
@@ -74,9 +63,7 @@ const wss = new WebSocketServer({
   }
 });
 
-function send(ws, obj) {
-  ws.send(JSON.stringify(obj));
-}
+function send(ws, obj) { ws.send(JSON.stringify(obj)); }
 function log(...args) { console.log("[MCP]", ...args); }
 
 wss.on("connection", (ws, req) => {
@@ -84,14 +71,10 @@ wss.on("connection", (ws, req) => {
 
   ws.on("message", async (buf) => {
     let msg;
-    try { msg = JSON.parse(buf.toString()); } catch {
-      log("Non-JSON message ignored");
-      return;
-    }
+    try { msg = JSON.parse(buf.toString()); } catch { log("Non-JSON message ignored"); return; }
     const { id, method } = msg;
     log("←", method || "(no method)");
 
-    // Handshake
     if (method === "initialize") {
       send(ws, {
         jsonrpc: "2.0",
@@ -99,27 +82,26 @@ wss.on("connection", (ws, req) => {
         result: {
           protocolVersion: PROTOCOL_VERSION,
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-          capabilities: { tools: {} }
+          capabilities: { tools: {} }   // explicit tools capability
         }
       });
       log("→ initialize/ok");
       return;
     }
 
-    // Some clients send these; respond benignly
+    // benign handlers
     if (method === "notifications/initialized") { log("notif initialized"); return; }
     if (method === "ping") { send(ws, { jsonrpc: "2.0", id, result: { ok: true } }); return; }
     if (method === "resources/list") { send(ws, { jsonrpc: "2.0", id, result: { resources: [] } }); return; }
     if (method === "prompts/list") { send(ws, { jsonrpc: "2.0", id, result: { prompts: [] } }); return; }
 
-    // Tool listing (support a few spellings just in case)
+    // tools/list (support alt spellings)
     if (method === "tools/list" || method === "listTools" || method === "getTools") {
       send(ws, { jsonrpc: "2.0", id, result: { tools: [toolSpec] } });
-      log("→ tools/list (1 tool)");
+      log("→ tools/list (1 tool)", JSON.stringify(toolSpec));
       return;
     }
 
-    // Tool call
     if (method === "tools/call") {
       const { name, arguments: args } = msg.params || {};
       if (name !== "qdrant_search") {
@@ -144,11 +126,7 @@ wss.on("connection", (ws, req) => {
 
         if (!r.ok) {
           const errTxt = await r.text();
-          send(ws, {
-            jsonrpc: "2.0",
-            id,
-            result: { content: [{ type: "text", text: `FastAPI ${r.status}: ${errTxt}` }], isError: true }
-          });
+          send(ws, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `FastAPI ${r.status}: ${errTxt}` }], isError: true } });
           log("→ tools/call FastAPI error", r.status);
           return;
         }
@@ -157,29 +135,20 @@ wss.on("connection", (ws, req) => {
         send(ws, { jsonrpc: "2.0", id, result: { content: [{ type: "json", data }], isError: false } });
         log("→ tools/call ok");
       } catch (e) {
-        send(ws, {
-          jsonrpc: "2.0",
-          id,
-          result: { content: [{ type: "text", text: "Gateway error: " + String(e) }], isError: true }
-        });
+        send(ws, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Gateway error: " + String(e) }], isError: true } });
         log("→ tools/call exception", e);
       }
       return;
     }
 
-    // Default
     send(ws, { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
     log("→ method not found", method);
   });
 });
 
-// Upgrade HTTP → WS only for /mcp
 server.on("upgrade", (req, socket, head) => {
   const { pathname } = parse(req.url || "/", false);
-  if (pathname !== "/mcp") {
-    socket.destroy();
-    return;
-  }
+  if (pathname !== "/mcp") { socket.destroy(); return; }
   log("HTTP upgrade → WS /mcp | proto:", req.headers["sec-websocket-protocol"]);
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
