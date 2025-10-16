@@ -1,3 +1,4 @@
+// server.js
 import http from "http";
 import { WebSocketServer } from "ws";
 import fetch from "node-fetch";
@@ -11,23 +12,27 @@ const PROTOCOL_VERSION = "2024-05-14";
 const SERVER_NAME = "akasha-mcp";
 const SERVER_VERSION = "0.1.0";
 
-// IMPORTANT: snake_case per MCP spec
+// Define once, reuse for both snake_case and camelCase
+const inputSchema = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+    traditions: {
+      oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }]
+    },
+    topK: { type: "number", default: 6 },
+    lang: { type: "string" }
+  },
+  required: ["query", "traditions"]
+};
+
+// Tool spec — advertise BOTH keys for client compatibility
 const toolSpec = {
   name: "qdrant_search",
   description:
     "Embed + search via Akasha FastAPI /query. Args: query, traditions (string|array), topK, lang.",
-  input_schema: {
-    type: "object",
-    properties: {
-      query: { type: "string" },
-      traditions: {
-        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }]
-      },
-      topK: { type: "number", default: 6 },
-      lang: { type: "string" }
-    },
-    required: ["query", "traditions"]
-  }
+  input_schema: inputSchema,   // MCP spec (snake_case)
+  inputSchema:  inputSchema    // some clients expect camelCase
 };
 
 // ---------- HTTP (discovery & health) ----------
@@ -39,7 +44,14 @@ const server = http.createServer((req, res) => {
     const proto = (req.headers["x-forwarded-proto"] || "https").toString();
     const wsProto = proto === "https" ? "wss" : "ws";
     const mcpUrl = `${wsProto}://${host}/mcp`;
-    const body = { mcp: { name: SERVER_NAME, version: SERVER_VERSION, protocol: PROTOCOL_VERSION, transport: { type: "websocket", url: mcpUrl } } };
+    const body = {
+      mcp: {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+        protocol: PROTOCOL_VERSION,
+        transport: { type: "websocket", url: mcpUrl }
+      }
+    };
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
     return;
@@ -82,7 +94,11 @@ wss.on("connection", (ws, req) => {
         result: {
           protocolVersion: PROTOCOL_VERSION,
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-          capabilities: { tools: {} }   // explicit tools capability
+          capabilities: {
+            tools:    { list: true, call: true },
+            prompts:  { list: true },
+            resources:{ list: true }
+          }
         }
       });
       log("→ initialize/ok");
