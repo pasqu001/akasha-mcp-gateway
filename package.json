@@ -1,0 +1,10 @@
+{
+    "name": "akasha-mcp-gateway",
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": { "start": "node server.js" },
+    "dependencies": {
+      "node-fetch": "3.3.2",
+      "ws": "8.18.0"
+    }
+  }
